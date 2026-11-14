@@ -1,0 +1,45 @@
+[package]
+name = "soundpass-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Lossless file transfer through audio, optimized for Windows WASAPI loopback"
+license = "GPL-3.0-only"
+repository = "https://github.com/bibiparrot/bibisoundpass"
+homepage = "https://github.com/bibiparrot/bibisoundpass"
+
+[[bin]]
+name = "soundpass-send"
+path = "src/bin/send.rs"
+
+[[bin]]
+name = "soundpass-recv"
+path = "src/bin/recv.rs"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+brotli = "8"
+clap = { version = "4", features = ["derive"] }
+crc32fast = "1"
+ggwave = "0.1"
+hound = "3"
+lzma-rs = "0.3"
+raptorq = "2"
+reed-solomon = "0.2"
+rustfft = "6"
+zstd = "0.13"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.27"
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

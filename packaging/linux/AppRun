@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+HERE="$(dirname "$(readlink -f "$0")")"
+command_name="${1:-}"
+
+case "$command_name" in
+  send)
+    shift
+    exec "$HERE/usr/bin/soundpass-send" "$@"
+    ;;
+  recv|receive)
+    shift
+    exec "$HERE/usr/bin/soundpass-recv" "$@"
+    ;;
+  ""|-h|--help)
+    echo "SoundPass AppImage"
+    echo "Usage: $0 send <file> [options]"
+    echo "       $0 recv [options]"
+    ;;
+  *)
+    echo "Unknown command '$command_name'; expected 'send' or 'recv'." >&2
+    exit 2
+    ;;
+esac

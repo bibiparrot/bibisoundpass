@@ -1,0 +1,10 @@
+/target/
+*.wav
+*.spc
+*.spc.jsonl
+*.spc.parts/
+/live-*/
+/diag-*/
+/recovered/
+/sample-测试.txt
+.DS_Store

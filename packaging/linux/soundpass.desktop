@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=SoundPass
+Comment=Lossless file transfer through audio
+Exec=soundpass
+Icon=soundpass
+Terminal=true
+Categories=Utility;AudioVideo;
