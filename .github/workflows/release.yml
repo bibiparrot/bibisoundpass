@@ -134,7 +134,8 @@ jobs:
           rsvg-convert --width 256 --height 256 packaging/linux/soundpass.svg \
             --output "$appdir/soundpass.png"
           cp "$appdir/soundpass.png" "$appdir/usr/share/icons/hicolor/256x256/apps/"
-          cp packaging/linux/soundpass.appdata.xml "$appdir/usr/share/metainfo/"
+          cp packaging/linux/com.bibiparrot.soundpass.metainfo.xml \
+            "$appdir/usr/share/metainfo/"
           ln -s soundpass.png "$appdir/.DirIcon"
           chmod +x "$appdir/AppRun" "$appdir/usr/bin/"*
           curl --fail --location --retry 3 \
