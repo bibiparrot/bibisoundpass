@@ -214,29 +214,503 @@ mod windows {
 #[cfg(windows)]
 pub use windows::{Player, capture, list_devices, play};
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod linux {
+    use anyhow::{Context as _, Result, bail, ensure};
+    use libpulse_binding as pulse;
+    use libpulse_simple_binding::Simple;
+    use pulse::callbacks::ListResult;
+    use pulse::context::{Context as PulseContext, FlagSet, State};
+    use pulse::mainloop::standard::{IterateResult, Mainloop};
+    use pulse::sample::{Format, Spec};
+    use pulse::stream::Direction;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
+
+    use crate::{Receiver, SAMPLE_RATE};
+
+    #[derive(Clone, Debug)]
+    struct DeviceInfo {
+        index: u32,
+        name: String,
+        description: String,
+        monitor_source_name: Option<String>,
+    }
+
+    #[derive(Default)]
+    struct DeviceCatalog {
+        default_sink_name: Option<String>,
+        default_source_name: Option<String>,
+        sinks: Vec<DeviceInfo>,
+        sources: Vec<DeviceInfo>,
+    }
+
+    impl DeviceCatalog {
+        fn select<'a>(
+            devices: &'a [DeviceInfo],
+            selector: Option<&str>,
+            default_name: Option<&str>,
+            kind: &str,
+        ) -> Result<&'a DeviceInfo> {
+            let selected = selector
+                .or(default_name)
+                .with_context(|| format!("PulseAudio did not report a default {kind} device"))?;
+            let index = selected.parse::<u32>().ok();
+            devices
+                .iter()
+                .find(|device| {
+                    index == Some(device.index)
+                        || device.name == selected
+                        || device.description == selected
+                })
+                .with_context(|| format!("{kind} device not found: {selected}"))
+        }
+
+        fn playback_sink(&self, selector: Option<&str>) -> Result<String> {
+            Ok(Self::select(
+                &self.sinks,
+                selector,
+                self.default_sink_name.as_deref(),
+                "output",
+            )?
+            .name
+            .clone())
+        }
+
+        fn capture_source(&self, loopback: bool, selector: Option<&str>) -> Result<String> {
+            if loopback {
+                let sink = Self::select(
+                    &self.sinks,
+                    selector,
+                    self.default_sink_name.as_deref(),
+                    "output / loopback",
+                )?;
+                sink.monitor_source_name
+                    .clone()
+                    .with_context(|| format!("output device has no monitor source: {}", sink.name))
+            } else {
+                Ok(Self::select(
+                    &self.sources,
+                    selector,
+                    self.default_source_name.as_deref(),
+                    "input",
+                )?
+                .name
+                .clone())
+            }
+        }
+    }
+
+    fn iterate(mainloop: &mut Mainloop) -> Result<()> {
+        match mainloop.iterate(true) {
+            IterateResult::Success(_) => Ok(()),
+            IterateResult::Quit(value) => bail!("PulseAudio main loop quit: {value:?}"),
+            IterateResult::Err(error) => Err(error).context("PulseAudio main loop failed"),
+        }
+    }
+
+    fn query_devices() -> Result<DeviceCatalog> {
+        let mut mainloop = Mainloop::new().context("create PulseAudio main loop")?;
+        let mut context =
+            PulseContext::new(&mainloop, "SoundPass").context("create PulseAudio context")?;
+        context
+            .connect(None, FlagSet::NOFLAGS, None)
+            .context("connect to PulseAudio/PipeWire audio service")?;
+        loop {
+            match context.get_state() {
+                State::Ready => break,
+                State::Failed | State::Terminated => {
+                    return Err(context.errno()).context(
+                        "connect to PulseAudio/PipeWire audio service; ensure pipewire-pulse or PulseAudio is running",
+                    );
+                }
+                _ => iterate(&mut mainloop)?,
+            }
+        }
+
+        let default_sink_name = Rc::new(RefCell::new(None));
+        let default_source_name = Rc::new(RefCell::new(None));
+        let server_done = Rc::new(Cell::new(false));
+        {
+            let sink = Rc::clone(&default_sink_name);
+            let source = Rc::clone(&default_source_name);
+            let done = Rc::clone(&server_done);
+            let _operation = context.introspect().get_server_info(move |info| {
+                *sink.borrow_mut() = info.default_sink_name.as_ref().map(ToString::to_string);
+                *source.borrow_mut() = info.default_source_name.as_ref().map(ToString::to_string);
+                done.set(true);
+            });
+            while !server_done.get() {
+                iterate(&mut mainloop)?;
+            }
+        }
+
+        let sinks = Rc::new(RefCell::new(Vec::new()));
+        let sinks_done = Rc::new(Cell::new(false));
+        let sinks_failed = Rc::new(Cell::new(false));
+        {
+            let values = Rc::clone(&sinks);
+            let done = Rc::clone(&sinks_done);
+            let failed = Rc::clone(&sinks_failed);
+            let _operation = context
+                .introspect()
+                .get_sink_info_list(move |result| match result {
+                    ListResult::Item(info) => {
+                        if let Some(name) = &info.name {
+                            values.borrow_mut().push(DeviceInfo {
+                                index: info.index,
+                                name: name.to_string(),
+                                description: info
+                                    .description
+                                    .as_ref()
+                                    .map_or_else(|| name.to_string(), ToString::to_string),
+                                monitor_source_name: info
+                                    .monitor_source_name
+                                    .as_ref()
+                                    .map(ToString::to_string),
+                            });
+                        }
+                    }
+                    ListResult::End => done.set(true),
+                    ListResult::Error => {
+                        failed.set(true);
+                        done.set(true);
+                    }
+                });
+            while !sinks_done.get() {
+                iterate(&mut mainloop)?;
+            }
+        }
+        if sinks_failed.get() {
+            bail!("PulseAudio failed to enumerate output devices");
+        }
+
+        let sources = Rc::new(RefCell::new(Vec::new()));
+        let sources_done = Rc::new(Cell::new(false));
+        let sources_failed = Rc::new(Cell::new(false));
+        {
+            let values = Rc::clone(&sources);
+            let done = Rc::clone(&sources_done);
+            let failed = Rc::clone(&sources_failed);
+            let _operation =
+                context
+                    .introspect()
+                    .get_source_info_list(move |result| match result {
+                        ListResult::Item(info) => {
+                            if let Some(name) = &info.name {
+                                values.borrow_mut().push(DeviceInfo {
+                                    index: info.index,
+                                    name: name.to_string(),
+                                    description: info
+                                        .description
+                                        .as_ref()
+                                        .map_or_else(|| name.to_string(), ToString::to_string),
+                                    monitor_source_name: None,
+                                });
+                            }
+                        }
+                        ListResult::End => done.set(true),
+                        ListResult::Error => {
+                            failed.set(true);
+                            done.set(true);
+                        }
+                    });
+            while !sources_done.get() {
+                iterate(&mut mainloop)?;
+            }
+        }
+        if sources_failed.get() {
+            bail!("PulseAudio failed to enumerate input devices");
+        }
+
+        context.disconnect();
+        Ok(DeviceCatalog {
+            default_sink_name: default_sink_name.borrow().clone(),
+            default_source_name: default_source_name.borrow().clone(),
+            sinks: Rc::try_unwrap(sinks)
+                .map_err(|_| anyhow::anyhow!("PulseAudio output list is still in use"))?
+                .into_inner(),
+            sources: Rc::try_unwrap(sources)
+                .map_err(|_| anyhow::anyhow!("PulseAudio input list is still in use"))?
+                .into_inner(),
+        })
+    }
+
+    pub fn list_devices() -> Result<()> {
+        let catalog = query_devices()?;
+        println!("output / loopback devices:");
+        for device in &catalog.sinks {
+            let default = if Some(device.name.as_str()) == catalog.default_sink_name.as_deref() {
+                " (default)"
+            } else {
+                ""
+            };
+            println!(
+                "  {}: {} [{}]{}; monitor: {}",
+                device.index,
+                device.description,
+                device.name,
+                default,
+                device
+                    .monitor_source_name
+                    .as_deref()
+                    .unwrap_or("unavailable")
+            );
+        }
+        println!("input devices:");
+        for device in &catalog.sources {
+            let default = if Some(device.name.as_str()) == catalog.default_source_name.as_deref() {
+                " (default)"
+            } else {
+                ""
+            };
+            println!(
+                "  {}: {} [{}]{}",
+                device.index, device.description, device.name, default
+            );
+        }
+        Ok(())
+    }
+
+    fn sample_spec() -> Result<Spec> {
+        let spec = Spec {
+            format: Format::FLOAT32NE,
+            channels: 1,
+            rate: SAMPLE_RATE,
+        };
+        ensure!(spec.is_valid(), "invalid PulseAudio sample specification");
+        Ok(spec)
+    }
+
+    pub struct Player {
+        stream: Simple,
+        bytes: Vec<u8>,
+    }
+
+    impl Player {
+        pub fn new(selector: Option<&str>) -> Result<Self> {
+            let catalog = query_devices()?;
+            let sink = catalog.playback_sink(selector)?;
+            let description = catalog
+                .sinks
+                .iter()
+                .find(|device| device.name == sink)
+                .map_or(sink.as_str(), |device| device.description.as_str());
+            eprintln!("playing on {description} [{sink}]");
+            let spec = sample_spec()?;
+            let stream = Simple::new(
+                None,
+                "SoundPass",
+                Direction::Playback,
+                Some(&sink),
+                "SoundPass file transmission",
+                &spec,
+                None,
+                None,
+            )
+            .context("open PulseAudio/PipeWire playback stream")?;
+            Ok(Self {
+                stream,
+                bytes: Vec::new(),
+            })
+        }
+
+        pub fn write(&mut self, samples: &[f32]) -> Result<()> {
+            if samples.is_empty() {
+                return Ok(());
+            }
+            self.bytes.clear();
+            self.bytes.reserve(size_of_val(samples));
+            for sample in samples {
+                self.bytes.extend_from_slice(&sample.to_ne_bytes());
+            }
+            self.stream
+                .write(&self.bytes)
+                .context("write to PulseAudio/PipeWire playback stream")
+        }
+
+        pub fn finish(self) -> Result<()> {
+            self.stream
+                .drain()
+                .context("finish PulseAudio/PipeWire playback")
+        }
+    }
+
+    pub fn play(samples: &[f32], selector: Option<&str>) -> Result<()> {
+        let mut player = Player::new(selector)?;
+        player.write(samples)?;
+        player.finish()
+    }
+
+    pub fn capture(
+        receiver: &mut Receiver,
+        loopback: bool,
+        selector: Option<&str>,
+        max_seconds: u64,
+        save_capture: Option<&std::path::Path>,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        let catalog = query_devices()?;
+        let source = catalog.capture_source(loopback, selector)?;
+        let description = if loopback {
+            catalog
+                .sinks
+                .iter()
+                .find(|device| device.monitor_source_name.as_deref() == Some(source.as_str()))
+                .map_or(source.as_str(), |device| device.description.as_str())
+        } else {
+            catalog
+                .sources
+                .iter()
+                .find(|device| device.name == source)
+                .map_or(source.as_str(), |device| device.description.as_str())
+        };
+        eprintln!(
+            "recording {} from {description} [{source}]",
+            if loopback { "loopback" } else { "input" }
+        );
+        let spec = sample_spec()?;
+        let stream = Simple::new(
+            None,
+            "SoundPass",
+            Direction::Record,
+            Some(&source),
+            "SoundPass file receiver",
+            &spec,
+            None,
+            None,
+        )
+        .context("open PulseAudio/PipeWire recording stream")?;
+        let mut raw = vec![0u8; 1024 * size_of::<f32>()];
+        let mut samples = Vec::with_capacity(1024);
+        let start = Instant::now();
+        let mut last_report = Instant::now();
+        let mut wav = save_capture
+            .map(|path| {
+                hound::WavWriter::create(
+                    path,
+                    hound::WavSpec {
+                        channels: 1,
+                        sample_rate: SAMPLE_RATE,
+                        bits_per_sample: 32,
+                        sample_format: hound::SampleFormat::Float,
+                    },
+                )
+            })
+            .transpose()?;
+        loop {
+            stream
+                .read(&mut raw)
+                .context("read from PulseAudio/PipeWire recording stream")?;
+            samples.clear();
+            for bytes in raw.chunks_exact(size_of::<f32>()) {
+                let sample = f32::from_ne_bytes(bytes.try_into().context("invalid audio sample")?);
+                if let Some(writer) = wav.as_mut() {
+                    writer.write_sample(sample)?;
+                }
+                samples.push(sample);
+            }
+            if let Some(done) = receiver.push_samples(&samples)? {
+                if let Some(writer) = wav {
+                    writer.finalize()?;
+                }
+                return Ok(Some(done));
+            }
+            if last_report.elapsed() >= Duration::from_secs(5) {
+                eprintln!(
+                    "heard {} modem frames; accepted {} packets; saved {} parts",
+                    receiver.heard, receiver.accepted, receiver.parts_saved
+                );
+                last_report = Instant::now();
+            }
+            if max_seconds > 0 && start.elapsed() >= Duration::from_secs(max_seconds) {
+                break;
+            }
+        }
+        if let Some(writer) = wav {
+            writer.finalize()?;
+        }
+        Ok(None)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{DeviceCatalog, DeviceInfo};
+
+        fn catalog() -> DeviceCatalog {
+            DeviceCatalog {
+                default_sink_name: Some("speaker".into()),
+                default_source_name: Some("microphone".into()),
+                sinks: vec![DeviceInfo {
+                    index: 3,
+                    name: "speaker".into(),
+                    description: "Built-in Audio".into(),
+                    monitor_source_name: Some("speaker.monitor".into()),
+                }],
+                sources: vec![DeviceInfo {
+                    index: 7,
+                    name: "microphone".into(),
+                    description: "USB Microphone".into(),
+                    monitor_source_name: None,
+                }],
+            }
+        }
+
+        #[test]
+        fn default_loopback_uses_the_default_sinks_monitor_source() {
+            let catalog = catalog();
+            assert_eq!(
+                catalog.capture_source(true, None).unwrap(),
+                "speaker.monitor"
+            );
+        }
+
+        #[test]
+        fn selectors_accept_index_internal_name_and_description() {
+            let catalog = catalog();
+            assert_eq!(catalog.playback_sink(Some("3")).unwrap(), "speaker");
+            assert_eq!(
+                catalog.playback_sink(Some("Built-in Audio")).unwrap(),
+                "speaker"
+            );
+            assert_eq!(
+                catalog.capture_source(false, Some("microphone")).unwrap(),
+                "microphone"
+            );
+            assert_eq!(
+                catalog.capture_source(false, Some("7")).unwrap(),
+                "microphone"
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub use linux::{Player, capture, list_devices, play};
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn list_devices() -> anyhow::Result<()> {
-    anyhow::bail!("live audio requires Windows")
+    anyhow::bail!("live audio is not implemented on this operating system")
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn play(_: &[f32], _: Option<&str>) -> anyhow::Result<()> {
-    anyhow::bail!("live audio requires Windows")
+    anyhow::bail!("live audio is not implemented on this operating system")
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub struct Player;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 impl Player {
     pub fn new(_: Option<&str>) -> anyhow::Result<Self> {
-        anyhow::bail!("live audio requires Windows")
+        anyhow::bail!("live audio is not implemented on this operating system")
     }
     pub fn write(&mut self, _: &[f32]) -> anyhow::Result<()> {
-        anyhow::bail!("live audio requires Windows")
+        anyhow::bail!("live audio is not implemented on this operating system")
     }
     pub fn finish(self) -> anyhow::Result<()> {
-        anyhow::bail!("live audio requires Windows")
+        anyhow::bail!("live audio is not implemented on this operating system")
     }
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn capture(
     _: &mut crate::Receiver,
     _: bool,
@@ -244,5 +718,5 @@ pub fn capture(
     _: u64,
     _: Option<&std::path::Path>,
 ) -> anyhow::Result<Option<(String, Vec<u8>)>> {
-    anyhow::bail!("live audio requires Windows")
+    anyhow::bail!("live audio is not implemented on this operating system")
 }

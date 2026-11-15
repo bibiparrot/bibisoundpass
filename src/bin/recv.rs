@@ -4,7 +4,7 @@ use soundpass_rs::{Profile, Receiver, SAMPLE_RATE, audio, record, save_file};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(about = "Record Windows audio and recover a transmitted file")]
+#[command(about = "Record live audio or decode a WAV and recover a transmitted file")]
 struct Args {
     #[arg(long)]
     input: Option<PathBuf>,

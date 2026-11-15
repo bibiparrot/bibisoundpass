@@ -4,7 +4,7 @@ use soundpass_rs::{Profile, SAMPLE_RATE, Transmission, audio, record};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(about = "Compress a file and transmit it through Windows audio")]
+#[command(about = "Compress a file and transmit it through live audio or a WAV file")]
 struct Args {
     file: Option<PathBuf>,
     #[arg(long)]

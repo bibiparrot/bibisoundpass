@@ -1,12 +1,11 @@
 [package]
 name = "soundpass-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
-description = "Lossless file transfer through audio, optimized for Windows WASAPI loopback"
+description = "Lossless file transfer through Windows WASAPI and Linux PulseAudio loopback"
 license = "GPL-3.0-only"
 repository = "https://github.com/bibiparrot/bibisoundpass"
-homepage = "https://github.com/bibiparrot/bibisoundpass"
 
 [[bin]]
 name = "soundpass-send"
@@ -36,6 +35,10 @@ tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.27"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding = "2.30"
+libpulse-simple-binding = "2.29"
 
 [lints.rust]
 unsafe_code = "warn"

@@ -9,7 +9,7 @@ on:
       version:
         description: Release version without the leading v
         required: true
-        default: "0.1.0"
+        default: "0.1.1"
 
 permissions:
   contents: write
@@ -49,7 +49,15 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install Linux audio development packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libpulse-dev pulseaudio pulseaudio-utils
       - run: cargo test --release --locked
+      - name: Test Linux live loopback
+        run: |
+          pulseaudio --start --exit-idle-time=-1
+          tests/linux_live_loopback.sh
 
   linux:
     needs: metadata
@@ -76,6 +84,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-${{ matrix.artifact_arch }}
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libpulse-dev librsvg2-bin
       - name: Build binaries
         run: cargo build --release --locked --bins --target "${{ matrix.target }}"
       - name: Install RPM builder
@@ -104,6 +116,7 @@ jobs:
             --license GPL-3.0-only \
             --description "Lossless file transfer through audio" \
             --url "https://github.com/bibiparrot/bibisoundpass" \
+            --depends pulseaudio-libs \
             -p "dist/soundpass-$VERSION-linux-$ARTIFACT_ARCH.rpm" .
 
           appdir="SoundPass-$ARTIFACT_ARCH.AppDir"
@@ -117,15 +130,40 @@ jobs:
           cp packaging/linux/soundpass.svg "$appdir/soundpass.svg"
           cp packaging/linux/soundpass.desktop "$appdir/usr/share/applications/"
           cp packaging/linux/soundpass.svg "$appdir/usr/share/icons/hicolor/scalable/apps/"
+          mkdir -p "$appdir/usr/share/icons/hicolor/256x256/apps"
+          rsvg-convert --width 256 --height 256 packaging/linux/soundpass.svg \
+            --output "$appdir/soundpass.png"
+          cp "$appdir/soundpass.png" "$appdir/usr/share/icons/hicolor/256x256/apps/"
           cp packaging/linux/soundpass.appdata.xml "$appdir/usr/share/metainfo/"
-          ln -s soundpass.svg "$appdir/.DirIcon"
+          ln -s soundpass.png "$appdir/.DirIcon"
           chmod +x "$appdir/AppRun" "$appdir/usr/bin/"*
+          curl --fail --location --retry 3 \
+            -o linuxdeploy.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-$APPIMAGE_ARCH.AppImage"
+          chmod +x linuxdeploy.AppImage
+          APPIMAGE_EXTRACT_AND_RUN=1 ./linuxdeploy.AppImage \
+            --appdir "$appdir" \
+            --executable "$appdir/usr/bin/soundpass-send" \
+            --executable "$appdir/usr/bin/soundpass-recv"
           curl --fail --location --retry 3 \
             -o appimagetool.AppImage \
             "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$APPIMAGE_ARCH.AppImage"
           chmod +x appimagetool.AppImage
           APPIMAGE_EXTRACT_AND_RUN=1 ARCH="$APPIMAGE_ARCH" ./appimagetool.AppImage "$appdir" \
             "dist/soundpass-$VERSION-linux-$ARTIFACT_ARCH.AppImage"
+          set +e
+          appimage_diagnostics="$(APPIMAGE_EXTRACT_AND_RUN=1 \
+            "dist/soundpass-$VERSION-linux-$ARTIFACT_ARCH.AppImage" send --devices 2>&1)"
+          appimage_status=$?
+          set -e
+          if grep -q "error while loading shared libraries" <<<"$appimage_diagnostics"; then
+            echo "$appimage_diagnostics" >&2
+            exit 1
+          fi
+          if [[ $appimage_status -ne 0 ]] && ! grep -Eq "PulseAudio|PipeWire" <<<"$appimage_diagnostics"; then
+            echo "$appimage_diagnostics" >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.artifact_arch }}
