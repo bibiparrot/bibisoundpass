@@ -9,7 +9,7 @@ on:
       version:
         description: Release version without the leading v
         required: true
-        default: "0.1.1"
+        default: "0.1.2"
 
 permissions:
   contents: write
@@ -58,6 +58,61 @@ jobs:
         run: |
           pulseaudio --start --exit-idle-time=-1
           tests/linux_live_loopback.sh
+
+  linux-to-windows-waveform:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-to-windows-waveform
+      - name: Install Linux audio development packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libpulse-dev
+      - name: Generate waveform with the Linux sender
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --bin soundpass-send
+          mkdir -p interop
+          head -c 4096 /dev/urandom > interop/source.bin
+          target/release/soundpass-send interop/source.bin \
+            --wav interop/transfer.wav --no-play --passes 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-to-windows-waveform
+          path: |
+            interop/source.bin
+            interop/transfer.wav
+          if-no-files-found: error
+
+  linux-to-windows-interop:
+    needs: linux-to-windows-waveform
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-to-windows-interop
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-to-windows-waveform
+          path: interop
+      - name: Decode Linux waveform with the Windows receiver
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked --bin soundpass-recv
+          New-Item -ItemType Directory -Force interop/recovered | Out-Null
+          target/release/soundpass-recv.exe --input interop/transfer.wav --out interop/recovered
+          $expected = (Get-FileHash interop/source.bin -Algorithm SHA256).Hash
+          $actual = (Get-FileHash interop/recovered/source.bin -Algorithm SHA256).Hash
+          if ($actual -ne $expected) {
+            throw "Linux sender and Windows receiver hashes differ"
+          }
 
   linux:
     needs: metadata
@@ -264,7 +319,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [metadata, test, linux, windows, macos]
+    needs: [metadata, test, linux-to-windows-interop, linux, windows, macos]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8

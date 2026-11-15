@@ -99,3 +99,51 @@ fn loopback_ofdm_recovers_from_periodic_audio_dropouts() -> Result<()> {
     assert_eq!(bytes, data);
     Ok(())
 }
+
+#[test]
+fn virtualbox_linux_guest_audio_is_decodable_by_windows_host_loopback() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join("virtualbox-guest.bin");
+    let mut state = 0x7a51_9e3bu32;
+    let data: Vec<u8> = (0..4096)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    fs::write(&source, &data)?;
+
+    let tx = Transmission::from_file(&source, 40)?;
+    let mut guest_samples = Vec::new();
+    tx.stream_audio(Profile::Loopback, 2, |chunk| {
+        guest_samples.extend_from_slice(chunk);
+        Ok(())
+    })?;
+
+    // Model the relevant parts of the VM path: Linux/Pulse mono float enters an
+    // emulated HDA device, is quantized, mixed to the Windows host's stereo
+    // render endpoint with unequal channel gains, and is downmixed by WASAPI.
+    let mut host_loopback = Vec::with_capacity(guest_samples.len());
+    for (index, sample) in guest_samples.into_iter().enumerate() {
+        let hda = f32::from((sample.clamp(-1.0, 1.0) * 32767.0) as i16) / 32768.0;
+        let noise = if index % 17 == 0 { 1.0 / 32768.0 } else { 0.0 };
+        let left = hda * 0.92 + noise;
+        let right = hda * 0.86 - noise;
+        host_loopback.push(f32::midpoint(left, right));
+    }
+
+    let mut rx = Receiver::new(Profile::Loopback)?;
+    let mut recovered = None;
+    for block in host_loopback.chunks(1024) {
+        if let Some(file) = rx.push_samples(block)? {
+            recovered = Some(file);
+            break;
+        }
+    }
+    let (name, bytes) = recovered.expect("Windows host loopback did not recover guest audio");
+    assert_eq!(name, "virtualbox-guest.bin");
+    assert_eq!(bytes, data);
+    Ok(())
+}

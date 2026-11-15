@@ -28,6 +28,25 @@ soundpass-recv --out ./received
 soundpass-send ./my-file.txt
 ```
 
+### Linux guest in VirtualBox to Windows host
+
+This direction uses the same default `loopback` profile and wire format. Oracle VirtualBox sends the Linux guest's emulated sound-card output to a Windows render endpoint; `soundpass-recv` captures that endpoint's system mix through WASAPI loopback.
+
+With the VM powered off, enable **Audio** and **Audio Output** in VirtualBox, select **Windows Audio Session** (`was`) or **Default** as the host audio driver, and use **Intel HD Audio** as the controller. In the Linux guest, start the sender normally. On the Windows host, start the receiver first:
+
+```powershell
+# Windows host: inspect render endpoints, then listen to the endpoint used by VirtualBox.
+soundpass-recv.exe --devices
+soundpass-recv.exe --device "Speakers (device name from --devices)" --out .\received
+```
+
+```bash
+# Linux guest
+./soundpass-0.1.2-linux-x86_64.AppImage send ./my-file.txt
+```
+
+When VirtualBox uses the Windows default output, omit `--device` on the receiver so both use that endpoint. For isolation from notification sounds, route VirtualBox to a dedicated virtual-cable render endpoint in the Windows volume mixer and select that same endpoint on the receiver. Guest audio input is not required. If the receiver reports zero heard frames, the VM is muted, audio output is disabled, or the selected Windows endpoint is not the one VirtualBox is using. Use `--save-capture capture.wav` to collect a diagnostic recording.
+
 ```powershell
 # Faster ggwave air profile
 .\target\release\soundpass-recv.exe --loopback false --profile air --out .\received
@@ -124,8 +143,8 @@ Windows and Linux support live playback and same-computer loopback capture. Wind
 The Linux AppImage wraps both commands. Use its first argument to select one:
 
 ```bash
-./soundpass-0.1.1-linux-x86_64.AppImage recv --out ./received
-./soundpass-0.1.1-linux-x86_64.AppImage send ./my-file.txt
+./soundpass-0.1.2-linux-x86_64.AppImage recv --out ./received
+./soundpass-0.1.2-linux-x86_64.AppImage send ./my-file.txt
 ```
 
-For reproducible releases, update the version in `Cargo.toml`, commit it, then create and push the matching tag, for example `v0.1.1`. The workflow also supports a manual run with an explicit version.
+For reproducible releases, update the version in `Cargo.toml`, commit it, then create and push the matching tag, for example `v0.1.2`. The workflow also supports a manual run with an explicit version.
