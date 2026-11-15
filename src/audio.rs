@@ -1,9 +1,12 @@
 #[cfg(windows)]
 mod windows {
-    use anyhow::{Context, Result, ensure};
+    use anyhow::{Context, Result, bail, ensure};
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
-    use wasapi::{Device, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
+    use sysinfo::System;
+    use wasapi::{
+        AudioClient, Device, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
+    };
 
     use crate::{Receiver, SAMPLE_RATE};
 
@@ -20,6 +23,113 @@ mod windows {
                 }
             }
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ProcessCandidate {
+        pid: u32,
+        name: String,
+    }
+
+    const REMOTE_DESKTOP_PROCESSES: &[&str] = &[
+        "uSmartView_VDI_Client.exe",
+        "VirtualAppVDI.exe",
+        "uSmartView.exe",
+        "mstsc.exe",
+        "msrdc.exe",
+        "wfica32.exe",
+        "vmware-view.exe",
+        "AnyDesk.exe",
+        "TeamViewer.exe",
+        "RustDesk.exe",
+        "Moonlight.exe",
+    ];
+
+    fn normalized_process_name(name: &str) -> String {
+        let lowercase = name.trim().to_ascii_lowercase();
+        lowercase
+            .strip_suffix(".exe")
+            .unwrap_or(&lowercase)
+            .to_owned()
+    }
+
+    fn select_process<'a>(
+        candidates: &'a [ProcessCandidate],
+        selector: &str,
+    ) -> Result<&'a ProcessCandidate> {
+        let mut matches: Vec<&ProcessCandidate> = if let Ok(pid) = selector.parse::<u32>() {
+            candidates
+                .iter()
+                .filter(|process| process.pid == pid)
+                .collect()
+        } else {
+            let wanted = normalized_process_name(selector);
+            candidates
+                .iter()
+                .filter(|process| normalized_process_name(&process.name) == wanted)
+                .collect()
+        };
+        matches.sort_by_key(|process| process.pid);
+        match matches.as_slice() {
+            [process] => Ok(process),
+            [] => {
+                let wanted = normalized_process_name(selector);
+                let suggestions = candidates
+                    .iter()
+                    .filter(|process| normalized_process_name(&process.name).contains(&wanted))
+                    .map(|process| format!("{} ({})", process.name, process.pid))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if suggestions.is_empty() {
+                    bail!(
+                        "process not found: {selector}; start the application before the receiver"
+                    )
+                }
+                bail!("process not found: {selector}; possible matches: {suggestions}")
+            }
+            _ => {
+                let choices = matches
+                    .iter()
+                    .map(|process| format!("{} ({})", process.name, process.pid))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!("multiple processes match {selector}; use a PID: {choices}")
+            }
+        }
+    }
+
+    fn select_remote_desktop_process(candidates: &[ProcessCandidate]) -> Option<&ProcessCandidate> {
+        REMOTE_DESKTOP_PROCESSES.iter().find_map(|wanted| {
+            let wanted = normalized_process_name(wanted);
+            candidates
+                .iter()
+                .filter(|process| normalized_process_name(&process.name) == wanted)
+                .min_by_key(|process| process.pid)
+        })
+    }
+
+    fn running_processes() -> Vec<ProcessCandidate> {
+        let system = System::new_all();
+        let mut candidates = system
+            .processes()
+            .iter()
+            .map(|(pid, process)| ProcessCandidate {
+                pid: pid.as_u32(),
+                name: process.name().to_string_lossy().into_owned(),
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|process| process.pid);
+        candidates
+    }
+
+    fn resolve_process(selector: &str) -> Result<ProcessCandidate> {
+        let candidates = running_processes();
+        select_process(&candidates, selector).cloned()
+    }
+
+    fn detect_remote_desktop_process() -> Option<ProcessCandidate> {
+        let candidates = running_processes();
+        select_remote_desktop_process(&candidates).cloned()
     }
 
     pub fn list_devices() -> Result<()> {
@@ -113,24 +223,55 @@ mod windows {
         receiver: &mut Receiver,
         loopback: bool,
         selector: Option<&str>,
+        process_selector: Option<&str>,
         max_seconds: u64,
         save_capture: Option<&std::path::Path>,
     ) -> Result<Option<(String, Vec<u8>)>> {
         wasapi::initialize_mta().ok()?;
-        let direction = if loopback {
-            Direction::Render
+        let selected_process = process_selector
+            .map(resolve_process)
+            .transpose()?
+            .or_else(|| {
+                (loopback && selector.is_none())
+                    .then(detect_remote_desktop_process)
+                    .flatten()
+            });
+        let process_capture = selected_process.is_some();
+        let mut client = if let Some(process) = selected_process {
+            ensure!(loopback, "--process requires --loopback true");
+            eprintln!(
+                "recording {}process loopback from {} (PID {}, including child processes)",
+                if process_selector.is_some() {
+                    ""
+                } else {
+                    "auto-selected remote desktop "
+                },
+                process.name,
+                process.pid
+            );
+            AudioClient::new_application_loopback_client(process.pid, true).with_context(
+                || "open Windows process loopback; this requires Windows 10 build 20348 or newer",
+            )?
         } else {
-            Direction::Capture
+            let direction = if loopback {
+                Direction::Render
+            } else {
+                Direction::Capture
+            };
+            let device = selected_device(direction, selector)?;
+            eprintln!(
+                "recording {} from {}",
+                if loopback { "loopback" } else { "input" },
+                device.get_friendlyname()?
+            );
+            device.get_iaudioclient()?
         };
-        let device = selected_device(direction, selector)?;
-        eprintln!(
-            "recording {} from {}",
-            if loopback { "loopback" } else { "input" },
-            device.get_friendlyname()?
-        );
-        let mut client = device.get_iaudioclient()?;
         let format = WaveFormat::new(32, 32, SampleType::Float, SAMPLE_RATE as usize, 2, None);
-        let (period, _) = client.get_device_period()?;
+        let period = if process_capture {
+            200_000
+        } else {
+            client.get_device_period()?.0
+        };
         client.initialize_client(
             &format,
             Direction::Capture,
@@ -208,6 +349,86 @@ mod windows {
         }
         ensure!(queue.len() < 8, "unexpected capture tail");
         Ok(None)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{ProcessCandidate, select_process, select_remote_desktop_process};
+
+        fn candidates() -> Vec<ProcessCandidate> {
+            vec![
+                ProcessCandidate {
+                    pid: 4100,
+                    name: "uSmartView.exe".into(),
+                },
+                ProcessCandidate {
+                    pid: 4200,
+                    name: "uSmartView_VDI_Client.exe".into(),
+                },
+            ]
+        }
+
+        #[test]
+        fn process_selector_accepts_pid_and_case_insensitive_executable_name() {
+            let values = candidates();
+            assert_eq!(select_process(&values, "4200").unwrap().pid, 4200);
+            assert_eq!(select_process(&values, "USMARTVIEW").unwrap().pid, 4100);
+            assert_eq!(select_process(&values, "usmartview.exe").unwrap().pid, 4100);
+        }
+
+        #[test]
+        fn process_selector_rejects_ambiguous_names() {
+            let values = vec![
+                ProcessCandidate {
+                    pid: 1,
+                    name: "viewer.exe".into(),
+                },
+                ProcessCandidate {
+                    pid: 2,
+                    name: "viewer.exe".into(),
+                },
+            ];
+            let error = select_process(&values, "viewer").unwrap_err().to_string();
+            assert!(error.contains("multiple processes"));
+            assert!(error.contains('1'));
+            assert!(error.contains('2'));
+        }
+
+        #[test]
+        fn auto_capture_prefers_usmartview_vdi_renderer_over_other_remote_desktops() {
+            let values = vec![
+                ProcessCandidate {
+                    pid: 50,
+                    name: "mstsc.exe".into(),
+                },
+                ProcessCandidate {
+                    pid: 70,
+                    name: "uSmartView_VDI_Client.exe".into(),
+                },
+                ProcessCandidate {
+                    pid: 80,
+                    name: "uSmartView.exe".into(),
+                },
+            ];
+            let selected = select_remote_desktop_process(&values).unwrap();
+            assert_eq!(selected.name, "uSmartView_VDI_Client.exe");
+            assert_eq!(selected.pid, 70);
+        }
+
+        #[test]
+        fn auto_capture_ignores_usmartview_background_services() {
+            let values = vec![
+                ProcessCandidate {
+                    pid: 10,
+                    name: "uSmartViewServiceAgent.exe".into(),
+                },
+                ProcessCandidate {
+                    pid: 20,
+                    name: "uSmartviewUpdate.exe".into(),
+                },
+            ];
+            assert!(select_remote_desktop_process(&values).is_none());
+        }
     }
 }
 
@@ -547,9 +768,14 @@ mod linux {
         receiver: &mut Receiver,
         loopback: bool,
         selector: Option<&str>,
+        process_selector: Option<&str>,
         max_seconds: u64,
         save_capture: Option<&std::path::Path>,
     ) -> Result<Option<(String, Vec<u8>)>> {
+        ensure!(
+            process_selector.is_none(),
+            "--process capture is only available on Windows"
+        );
         let catalog = query_devices()?;
         let source = catalog.capture_source(loopback, selector)?;
         let description = if loopback {
@@ -714,6 +940,7 @@ impl Player {
 pub fn capture(
     _: &mut crate::Receiver,
     _: bool,
+    _: Option<&str>,
     _: Option<&str>,
     _: u64,
     _: Option<&std::path::Path>,

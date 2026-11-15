@@ -18,6 +18,9 @@ struct Args {
     loopback: bool,
     #[arg(long)]
     device: Option<String>,
+    /// Capture one Windows process and its child processes by PID or executable name.
+    #[arg(long, value_name = "PID_OR_NAME", conflicts_with = "device")]
+    process: Option<String>,
     #[arg(long, value_enum, default_value = "loopback")]
     profile: Profile,
     #[arg(long, default_value_t = 0)]
@@ -40,6 +43,7 @@ fn main() -> Result<()> {
             &mut receiver,
             args.loopback,
             args.device.as_deref(),
+            args.process.as_deref(),
             args.max_seconds,
             args.save_capture.as_deref(),
         )?

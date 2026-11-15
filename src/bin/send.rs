@@ -19,7 +19,7 @@ struct Args {
     profile: Profile,
     #[arg(long, default_value_t = 40)]
     repair_percent: u32,
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 1)]
     passes: u32,
 }
 
