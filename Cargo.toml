@@ -1,6 +1,6 @@
 [package]
 name = "soundpass-rs"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.85"
 description = "Lossless file transfer through Windows WASAPI and Linux PulseAudio loopback"

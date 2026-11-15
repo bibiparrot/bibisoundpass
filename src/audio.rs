@@ -33,6 +33,7 @@ mod windows {
 
     const REMOTE_DESKTOP_PROCESSES: &[&str] = &[
         "uSmartView_VDI_Client.exe",
+        "uSmartView_VStart.exe",
         "VirtualAppVDI.exe",
         "uSmartView.exe",
         "mstsc.exe",
@@ -46,7 +47,12 @@ mod windows {
     ];
 
     fn normalized_process_name(name: &str) -> String {
-        let lowercase = name.trim().to_ascii_lowercase();
+        let trimmed = name.trim();
+        let basename = std::path::Path::new(trimmed)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or(trimmed);
+        let lowercase = basename.to_ascii_lowercase();
         lowercase
             .strip_suffix(".exe")
             .unwrap_or(&lowercase)
@@ -365,6 +371,10 @@ mod windows {
                     pid: 4200,
                     name: "uSmartView_VDI_Client.exe".into(),
                 },
+                ProcessCandidate {
+                    pid: 4300,
+                    name: "uSmartView_VStart.exe".into(),
+                },
             ]
         }
 
@@ -374,6 +384,15 @@ mod windows {
             assert_eq!(select_process(&values, "4200").unwrap().pid, 4200);
             assert_eq!(select_process(&values, "USMARTVIEW").unwrap().pid, 4100);
             assert_eq!(select_process(&values, "usmartview.exe").unwrap().pid, 4100);
+            assert_eq!(
+                select_process(
+                    &values,
+                    r"C:\Program Files (x86)\uSmartView\client\uSmartView_VDI_Client.exe"
+                )
+                .unwrap()
+                .pid,
+                4200
+            );
         }
 
         #[test]
@@ -395,11 +414,15 @@ mod windows {
         }
 
         #[test]
-        fn auto_capture_prefers_usmartview_vdi_renderer_over_other_remote_desktops() {
+        fn auto_capture_prefers_usmartview_vdi_client_over_other_remote_desktops() {
             let values = vec![
                 ProcessCandidate {
                     pid: 50,
                     name: "mstsc.exe".into(),
+                },
+                ProcessCandidate {
+                    pid: 60,
+                    name: "uSmartView_VStart.exe".into(),
                 },
                 ProcessCandidate {
                     pid: 70,

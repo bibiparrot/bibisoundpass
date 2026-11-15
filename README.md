@@ -21,7 +21,7 @@ Start the receiver first, then the sender in another terminal:
 
 Both programs use the default playback device and the high-rate `loopback` OFDM profile. The receiver records the **output device** via shared-mode WASAPI loopback. Use `--devices` to list output and input devices, and `--device 0` or `--device "exact device name"` to select one. For speaker-to-microphone, line-in, or an uncertain channel, select the same ggwave profile on both sides:
 
-On Windows, live receive defaults to an automatic fast path. If a supported remote-desktop client is running, SoundPass captures that process and its child processes directly through Windows application loopback, independent of the physical playback endpoint. It recognizes uSmartView, Microsoft RDP, Citrix Workspace, VMware Horizon, AnyDesk, TeamViewer, RustDesk, and Moonlight. Otherwise it falls back to normal endpoint loopback. The modem remains the fastest `loopback` OFDM profile in both cases. `--process PID_OR_NAME` selects a process explicitly; specifying `--device` forces endpoint loopback instead of automatic process capture. Process capture requires Windows 10 build 20348 or newer.
+On Windows, live receive defaults to an automatic fast path. If a supported remote-desktop client is running, SoundPass captures that process and its child processes directly through Windows application loopback, independent of the physical playback endpoint. For uSmartView it prioritizes the confirmed audio process `uSmartView_VDI_Client.exe`, then `uSmartView_VStart.exe` and other uSmartView executables. It also recognizes Microsoft RDP, Citrix Workspace, VMware Horizon, AnyDesk, TeamViewer, RustDesk, and Moonlight. Otherwise it falls back to normal endpoint loopback. The modem remains the fastest `loopback` OFDM profile in both cases. `--process PID_OR_NAME` selects a process explicitly; specifying `--device` forces endpoint loopback instead of automatic process capture. Process capture requires Windows 10 build 20348 or newer.
 
 On Linux, the same commands use the default PulseAudio/PipeWire sink and automatically capture its monitor source. `--devices` prints each sink's index, internal name, display name, and monitor source. Pass its index, internal name, or exact display name to `--device`. Start the receiver before the sender:
 
@@ -44,7 +44,7 @@ soundpass-recv.exe --device "Speakers (device name from --devices)" --out .\rece
 
 ```bash
 # Linux guest
-./soundpass-0.1.3-linux-x86_64.AppImage send ./my-file.txt
+./soundpass-0.1.4-linux-x86_64.AppImage send ./my-file.txt
 ```
 
 When VirtualBox uses the Windows default output, omit `--device` on the receiver so both use that endpoint. For isolation from notification sounds, route VirtualBox to a dedicated virtual-cable render endpoint in the Windows volume mixer and select that same endpoint on the receiver. Guest audio input is not required. If the receiver reports zero heard frames, the VM is muted, audio output is disabled, or the selected Windows endpoint is not the one VirtualBox is using. Use `--save-capture capture.wav` to collect a diagnostic recording.
@@ -60,8 +60,8 @@ soundpass-recv.exe --out .\received
 The receiver prints `auto-selected remote desktop process loopback` and the selected executable/PID. If automatic discovery cannot see the session process, select the main client or its VDI child explicitly:
 
 ```powershell
-soundpass-recv.exe --process uSmartView --out .\received
 soundpass-recv.exe --process uSmartView_VDI_Client --out .\received
+soundpass-recv.exe --process uSmartView_VStart --out .\received
 # A PID from Task Manager also works:
 soundpass-recv.exe --process 12345 --out .\received
 ```
@@ -69,7 +69,7 @@ soundpass-recv.exe --process 12345 --out .\received
 Inside the Linux cloud desktop, send with the default fast OFDM profile:
 
 ```bash
-./soundpass-0.1.3-linux-x86_64.AppImage send ./my-file.txt
+./soundpass-0.1.4-linux-x86_64.AppImage send ./my-file.txt
 ```
 
 ```powershell
@@ -168,8 +168,8 @@ Windows and Linux support live playback and same-computer loopback capture. Wind
 The Linux AppImage wraps both commands. Use its first argument to select one:
 
 ```bash
-./soundpass-0.1.3-linux-x86_64.AppImage recv --out ./received
-./soundpass-0.1.3-linux-x86_64.AppImage send ./my-file.txt
+./soundpass-0.1.4-linux-x86_64.AppImage recv --out ./received
+./soundpass-0.1.4-linux-x86_64.AppImage send ./my-file.txt
 ```
 
-For reproducible releases, update the version in `Cargo.toml`, commit it, then create and push the matching tag, for example `v0.1.3`. The workflow also supports a manual run with an explicit version.
+For reproducible releases, update the version in `Cargo.toml`, commit it, then create and push the matching tag, for example `v0.1.4`. The workflow also supports a manual run with an explicit version.
