@@ -222,7 +222,7 @@ jobs:
           fi
       - uses: actions/upload-artifact@v7
         with:
-          name: linux-${{ matrix.artifact_arch }}
+          name: release-linux-${{ matrix.artifact_arch }}
           path: dist/*
           if-no-files-found: error
 
@@ -266,7 +266,7 @@ jobs:
           & $iscc "/DAppVersion=$env:VERSION" "/DSourceDir=$((Resolve-Path stage).Path)" "/DOutputDir=$((Resolve-Path dist).Path)" packaging/windows/soundpass.iss
       - uses: actions/upload-artifact@v7
         with:
-          name: windows-x86_64
+          name: release-windows-x86_64
           path: dist/*
           if-no-files-found: error
 
@@ -314,7 +314,7 @@ jobs:
             "dist/$package_name.dmg"
       - uses: actions/upload-artifact@v7
         with:
-          name: macos-${{ matrix.artifact_arch }}
+          name: release-macos-${{ matrix.artifact_arch }}
           path: dist/*
           if-no-files-found: error
 
@@ -325,6 +325,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          pattern: release-*
           merge-multiple: true
       - name: Create checksums
         shell: bash
